@@ -3,86 +3,124 @@
   hosts: localhost
   become: true
   vars:
-    cluster_name: "kahus-workload-cluster"
+    cluster_name: "kahus-workload-cluster-2"
     cluster_namespace: "default"
     tmp_dir: "/tmp/{{ cluster_name }}"
     mgmt_cluster_config: /home/kanderson/.kube/config-kahu-test-new
   environment:
     KUBECONFIG: "{{ mgmt_cluster_config }}"
   tasks:
+    - name: Validate management cluster configuration
+      block:
+        - name: Check if kubeconfig file exists
+          ansible.builtin.assert:
+            that:
+              - mgmt_cluster_config is defined
+              - mgmt_cluster_config | length > 0
+              - mgmt_cluster_config is file
+            fail_msg: "Management cluster config file '{{ mgmt_cluster_config }}' does not exist or is not a file"
+            success_msg: "Management cluster config file exists"
+
+        - name: Verify CAPI management cluster
+          ansible.builtin.shell: |
+            kubectl api-resources --api-group=cluster.x-k8s.io --no-headers | wc -l
+          register: capi_api_resources
+          changed_when: false
+
+        - name: Fail if no CAPI resources found
+          ansible.builtin.fail:
+            msg: "The cluster at '{{ mgmt_cluster_config }}' does not have Cluster API resources installed"
+          when: capi_api_resources.stdout | int == 0
+
+        - name: Verify workload cluster exists
+          ansible.builtin.shell: |
+            kubectl get cluster {{ cluster_name }} -n {{ cluster_namespace }} --no-headers | wc -l
+          register: workload_cluster_exists
+          changed_when: false
+
+        - name: Fail if workload cluster does not exist
+          ansible.builtin.fail:
+            msg: "The workload cluster '{{ cluster_name }}' does not exist"
+          when: workload_cluster_exists.stdout | int == 0
+
+      rescue:
+        - name: Handle validation failure
+          ansible.builtin.fail:
+            msg: "Failed to validate configuration: {{ ansible_failed_result.msg }}"
+
     - name: Get {{ cluster_name }} kubeconfig
-      shell: >
+      ansible.builtin.shell: >
         kubectl get secret {{ cluster_name }}-kubeconfig -n {{ cluster_namespace }} -o jsonpath='{.data.value}' | base64 --decode > {{ tmp_dir }}/{{ cluster_name }}.kubeconfig
 
     - name: Get {{ cluster_name }} UID
-      shell: >
+      ansible.builtin.shell: >
         kubectl get cluster {{ cluster_name }} -n {{ cluster_namespace }} -o jsonpath='{.metadata.uid}'
       register: cluster_uid_output
 
     - name: Set {{ cluster_name }} UID
-      set_fact:
+      ansible.builtin.set_fact:
         cluster_uid: "{{ cluster_uid_output.stdout }}"
 
     - name: Create ServiceAccount with ownerReference
-      template:
+      ansible.builtin.template:
         src: "autoscaler-sa.yml.j2"
         dest: "{{ tmp_dir }}/{{ cluster_name }}-sa.yml"
         mode: 0644
 
     - name: Apply ServiceAccount
-      shell: kubectl apply -f {{ tmp_dir }}/{{ cluster_name }}-sa.yml
+      ansible.builtin.shell: kubectl apply -f {{ tmp_dir }}/{{ cluster_name }}-sa.yml
 
     - name: Get SA token from secret
-      shell: >
+      ansible.builtin.shell: >
         kubectl get secret service-token -n {{ cluster_namespace }} -o jsonpath='{.data.token}' | base64 --decode
       register: sa_token
 
     - name: Create Role manifest for Machine API management
-      template:
+      ansible.builtin.template:
         src: "autoscaler-role.yml.j2"
         dest: "{{ tmp_dir }}/autoscaler-role.yml"
         mode: 0640
 
     - name: Create RoleBinding manifest
-      template:
+      ansible.builtin.template:
         src: "autoscaler-rolebinding.yml.j2"
         dest: "{{ tmp_dir }}/autoscaler-rolebinding.yml"
         mode: 0640
 
     - name: Apply RBAC manifests
-      shell: >
+      ansible.builtin.shell: >
         kubectl apply -f {{ tmp_dir }}/autoscaler-role.yml &&
         kubectl apply -f {{ tmp_dir }}/autoscaler-rolebinding.yml
 
     - name: Get current context
-      shell: kubectl config current-context
+      ansible.builtin.shell: kubectl config current-context
       register: current_context
 
     - name: Get cluster name from current context
-      shell: >
+      ansible.builtin.shell: >
         kubectl config view -o jsonpath='{.contexts[?(@.name=="{{ current_context.stdout }}")].context.cluster}'
       register: context_cluster_name
 
     - name: Get management cluster endpoint by cluster name
-      shell: >
+      ansible.builtin.shell: >
         kubectl config view -o jsonpath='{.clusters[?(@.name=="{{ context_cluster_name.stdout }}")].cluster.server}'
       register: mgmt_cluster_endpoint
 
     - name: Set management cluster endpoint
-      set_fact:
+      ansible.builtin.set_fact:
         cluster_endpoint: "{{ mgmt_cluster_endpoint.stdout }}"
 
     - name: Get management CA cert by cluster name
-      shell: >
+      ansible.builtin.shell: >
         kubectl config view --raw -o jsonpath='{.clusters[?(@.name=="{{ context_cluster_name.stdout }}")].cluster.certificate-authority-data}'
       register: management_ca_crt
 
     - name: Set management cluster CA
-      set_fact:
+      ansible.builtin.set_fact:
         cluster_ca_crt: "{{ management_ca_crt.stdout }}"
 
     - name: Create autoscaler kubeconfig from SA token
-      copy:
+      ansible.builtin.copy:
         dest: "{{ tmp_dir }}/autoscaler-kubeconfig"
         mode: '0600'
         content: |
@@ -106,16 +144,16 @@
               token: {{ sa_token.stdout }}
 
     - name: Create kubeconfig secret for autoscaler in workload cluster kube-system namespace
-      shell: >
+      ansible.builtin.shell: >
         kubectl --kubeconfig {{ tmp_dir }}/{{ cluster_name }}.kubeconfig create secret generic kubeconfig \
           --from-file=kubeconfig={{ tmp_dir }}/autoscaler-kubeconfig -n kube-system --dry-run=client -o yaml | \
         kubectl --kubeconfig {{ tmp_dir }}/{{ cluster_name }}.kubeconfig apply -f -
 
     - name: Get cluster-autoscaler pod name
-      shell: >
+      ansible.builtin.shell: >
         kubectl --kubeconfig {{ tmp_dir }}/{{ cluster_name }}.kubeconfig get pods -A | grep cluster-autoscaler | awk '{print $2}'
       register: autoscaler_pod_name
 
     - name: Restart cluster-autoscaler pod
-      shell: >
+      ansible.builtin.shell: >
         kubectl --kubeconfig {{ tmp_dir }}/{{ cluster_name }}.kubeconfig delete pod {{ autoscaler_pod_name.stdout }} -n kube-system
