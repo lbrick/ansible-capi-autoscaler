@@ -72,7 +72,7 @@
 
     - name: Get SA token from secret
       ansible.builtin.shell: >
-        kubectl get secret cluster-autoscaler-token-{{ cluster_name }} -n {{ cluster_namespace }} -o jsonpath='{.data.token}' | base64 --decode
+        kubectl get secret {{ cluster_name }}-cluster-autoscaler-token -n {{ cluster_namespace }} -o jsonpath='{.data.token}' | base64 --decode
       register: sa_token
       until: sa_token.stdout != ""
       retries: 10

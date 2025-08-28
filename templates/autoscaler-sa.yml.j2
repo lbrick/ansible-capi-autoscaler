@@ -16,7 +16,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   namespace: {{ cluster_namespace }}
-  name: "cluster-autoscaler-token-{{ cluster_name }}"
+  name: "{{ cluster_name }}-cluster-autoscaler-token"
   annotations:
     kubernetes.io/service-account.name: "cluster-autoscaler"
   ownerReferences:
