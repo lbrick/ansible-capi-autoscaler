@@ -3,10 +3,10 @@
   hosts: localhost
   become: true
   vars:
-    cluster_name: "kahus-workload-cluster-2"
+    cluster_name: "kahus-0-2-workload"
     cluster_namespace: "default"
     tmp_dir: "/tmp/{{ cluster_name }}"
-    mgmt_cluster_config: /home/kanderson/.kube/config-kahu-test-new
+    mgmt_cluster_config: /home/kanderson/.kube/config-kahu-mgmt-logging
   environment:
     KUBECONFIG: "{{ mgmt_cluster_config }}"
   tasks:
@@ -72,8 +72,11 @@
 
     - name: Get SA token from secret
       ansible.builtin.shell: >
-        kubectl get secret service-token -n {{ cluster_namespace }} -o jsonpath='{.data.token}' | base64 --decode
+        kubectl get secret cluster-autoscaler-token-{{ cluster_name }} -n {{ cluster_namespace }} -o jsonpath='{.data.token}' | base64 --decode
       register: sa_token
+      until: sa_token.stdout != ""
+      retries: 10
+      delay: 3
 
     - name: Create Role manifest for Machine API management
       ansible.builtin.template:
