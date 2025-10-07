@@ -48,6 +48,12 @@
           ansible.builtin.fail:
             msg: "Failed to validate configuration: {{ ansible_failed_result.msg }}"
 
+    - name: Ensure {{ tmp_dir }} directory exists
+      ansible.builtin.file:
+        path: "{{ tmp_dir }}"
+        state: directory
+        mode: 0755
+
     - name: Get {{ cluster_name }} kubeconfig
       ansible.builtin.shell: >
         kubectl --kubeconfig {{ mgmt_cluster_config }} get secret {{ cluster_name }}-kubeconfig -n {{ cluster_namespace }} -o jsonpath='{.data.value}' | base64 --decode > {{ tmp_dir }}/{{ cluster_name }}.kubeconfig
@@ -152,11 +158,24 @@
           --from-file=kubeconfig={{ tmp_dir }}/autoscaler-kubeconfig -n kube-system --dry-run=client -o yaml | \
         kubectl --kubeconfig {{ tmp_dir }}/{{ cluster_name }}.kubeconfig apply -f -
 
-    - name: Get cluster-autoscaler pod name
+    - name: Export the cluster-autoscaler Deployment YAML
       ansible.builtin.shell: >
-        kubectl --kubeconfig {{ tmp_dir }}/{{ cluster_name }}.kubeconfig get pods -A | grep cluster-autoscaler | awk '{print $2}'
-      register: autoscaler_pod_name
+        kubectl --kubeconfig {{ tmp_dir }}/{{ cluster_name }}.kubeconfig get deployment -n kube-system cluster-autoscaler-{{ cluster_name }} -o yaml > outputs/cluster-autoscaler-{{ cluster_name }}.yml
+      changed_when: true
 
-    - name: Restart cluster-autoscaler pod
+    - name: Create an editable COPY for modifications
+      ansible.builtin.copy:
+        src: "outputs/cluster-autoscaler-{{ cluster_name }}.yml"
+        dest: "outputs/cluster-autoscaler-{{ cluster_name }}-updated.yml"
+      changed_when: true
+
+    # Use yq to add the new argument to the args array for the 'cluster-autoscaler' container
+    - name: Inject the auto-discovery argument using yq
       ansible.builtin.shell: >
-        kubectl --kubeconfig {{ tmp_dir }}/{{ cluster_name }}.kubeconfig delete pod {{ autoscaler_pod_name.stdout }} -n kube-system
+        yq e '(.spec.template.spec.containers[] | select(.name == "cluster-autoscaler").args) += ["--node-group-auto-discovery=clusterapi:clusterName={{ cluster_name }}"]' -i outputs/cluster-autoscaler-{{ cluster_name }}-updated.yml
+      changed_when: true
+
+    - name: Apply the modified Deployment YAML
+      ansible.builtin.shell: >
+        kubectl --kubeconfig {{ tmp_dir }}/{{ cluster_name }}.kubeconfig apply -f outputs/cluster-autoscaler-{{ cluster_name }}-updated.yml
+      changed_when: true

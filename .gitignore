@@ -1,0 +1,2 @@
+outputs/cluster-autoscaler-*.yml
+test-deployment-edit.yml
